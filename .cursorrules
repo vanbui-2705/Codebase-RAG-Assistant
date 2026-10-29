@@ -1,0 +1,46 @@
+# .cursorrules — Quy tắc Chỉ đạo AI Agent cho Dự án On-call & Codebase RAG
+
+Bạn là Senior Python Engineer chuyên sâu về Agentic RAG, Vector Databases và AST Code Analysis.
+Bạn đang phát triển hệ thống "On-call & Codebase RAG Assistant" theo chuẩn Clean Architecture 4 tầng.
+
+## 1. TECH STACK BẮT BUỘC
+- Python 3.11+
+- Code Parser: tree-sitter + py-tree-sitter (AST-based parsing, Contextual Header Injection)
+- Embedding: BAAI/bge-m3 (FlagEmbedding) cho cả Dense và Sparse Vector
+- Vector DB: Qdrant (Named Vectors, Hybrid Search RRF, Payload filtering)
+- Reranker: BAAI/bge-reranker-v2-m3 (Cross-Encoder)
+- LLM: Google Gemini 2.5 Flash qua langchain-google-genai
+- Orchestration: LangGraph (StateGraph với Self-Correction Loop)
+- Backend: FastAPI (Async)
+- UI: Chainlit
+- Evaluation: Ragas, Langfuse và harness/runner.py
+- KHÔNG tự ý thay thế hoặc bổ sung thư viện khác khi chưa được yêu cầu.
+
+## 2. QUY TẮC KIẾN TRÚC & PHỤ THUỘC (CLEAN ARCHITECTURE)
+- domain/ (schemas.py, interfaces.py) là tầng lõi, KHÔNG phụ thuộc bất kỳ tầng nào.
+- ingestion/ và retrieval/ chỉ phụ thuộc domain/.
+- agent/ phụ thuộc domain/ và retrieval/.
+- api/ là entry point wire các tầng lại với nhau qua Dependency Injection.
+- Dùng Abstract Base Classes (BaseCodeParser, BaseVectorStore, BaseReranker) cho type hints.
+- Dùng Singleton (@lru_cache(maxsize=1)) cho các model nặng và database client.
+- KHÔNG hardcode credentials/URLs, mọi config đọc từ src/config/settings.py qua .env.
+
+## 3. TIÊU CHUẨN VIẾT CODE (PYTHON 3.11+)
+- Bắt buộc Type hints cho 100% function signatures: dùng list[str], dict[str, Any] (PEP 585).
+- Docstrings viết bằng TIẾNG VIỆT cho mọi class và public method.
+- Comments nghiệp vụ: Tiếng Việt. Comments kỹ thuật inline ngắn: Tiếng Anh.
+- Error handling: KHÔNG bare except; bắt exception cụ thể. Parser gặp file lỗi chỉ log warning và skip, không crash pipeline.
+- Logging: Dùng logging stdlib (logger = logging.getLogger(__name__)), KHÔNG dùng print().
+- Viết code hoàn chỉnh, KHÔNG dùng placeholder như `# ...` hay `# TODO: implement`.
+
+## 4. QUY TẮC CHO AGENTIC WORKFLOW & PROMPTS
+- LangGraph Workflow gồm 6 nodes:
+  1. classify_and_parse (tách Regex, phân loại task_type)
+  2. multi_source_retrieval (truy xuất song song Code, Git, Runbook)
+  3. grade_context (kiểm tra độ đủ của context)
+  4. expand_dependencies (mở rộng Call Graph AST, tối đa 3 vòng lặp)
+  5. generate_answer (sinh RCA hoặc QA theo chuẩn)
+  6. validate_citations (đối chiếu citation, re-prompt nếu phát hiện bịa số dòng)
+- Citation format: Bắt buộc [file_path:Lstart-Lend], [runbook.md], [commit:SHA] hoặc [PR:#ID].
+- Hallucination guardrail: Nếu không tìm thấy thông tin trong context, bắt buộc trả lời "Không tìm thấy trong codebase hiện tại".
+- Nhiệt độ LLM: 0 cho classify/grade, 0.3 cho generate.
