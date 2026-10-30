@@ -18,7 +18,7 @@ Bạn đang phát triển hệ thống "On-call & Codebase RAG Assistant" theo c
 
 ## 2. QUY TẮC KIẾN TRÚC & PHỤ THUỘC (CLEAN ARCHITECTURE)
 - domain/ (schemas.py, interfaces.py) là tầng lõi, KHÔNG phụ thuộc bất kỳ tầng nào.
-- ingestion/ và retrieval/ chỉ phụ thuộc domain/.
+- ingestion/ và retrieval/ chỉ phụ thuộc domain/ và config/.
 - agent/ phụ thuộc domain/ và retrieval/.
 - api/ là entry point wire các tầng lại với nhau qua Dependency Injection.
 - Dùng Abstract Base Classes (BaseCodeParser, BaseVectorStore, BaseReranker) cho type hints.
@@ -33,7 +33,18 @@ Bạn đang phát triển hệ thống "On-call & Codebase RAG Assistant" theo c
 - Logging: Dùng logging stdlib (logger = logging.getLogger(__name__)), KHÔNG dùng print().
 - Viết code hoàn chỉnh, KHÔNG dùng placeholder như `# ...` hay `# TODO: implement`.
 
-## 4. QUY TẮC CHO AGENTIC WORKFLOW & PROMPTS
+## 4. QUY TRÌNH LÀM VIỆC BẮT BUỘC (MANDATORY AGENT WORKFLOW)
+Mỗi khi phát triển tính năng hoặc hoàn thành 1 giai đoạn (Phase), Agent BẮT BUỘC tuân thủ:
+1. Viết Unit Tests tương ứng trong `tests/`.
+2. CHẠY KIỂM THỬ: Thực thi lệnh: pytest tests/ -v
+3. ĐỐI SOÁT & SỬA LỖI: Chỉ khi 100% tests PASSED (0 failures, 0 errors) mới được chuyển sang bước tiếp theo.
+4. GIT COMMIT & PUSH:
+   git add .
+   git commit -m "[Phase X] <Mô tả chi tiết công việc>"
+   git push origin main
+TUYỆT ĐỐI KHÔNG commit hay push lên Git khi chưa chạy kiểm thử hoặc khi tests bị lỗi!
+
+## 5. QUY TẮC CHO AGENTIC WORKFLOW & PROMPTS
 - LangGraph Workflow gồm 6 nodes:
   1. classify_and_parse (tách Regex, phân loại task_type)
   2. multi_source_retrieval (truy xuất song song Code, Git, Runbook)

@@ -2,7 +2,7 @@
 
 Tài liệu này định nghĩa chính thức:
 1. **System Prompt** cho LLM Agent phục vụ luồng suy luận (Agentic Workflow).
-2. **Agent Rules** cấu hình cho AI Coding Assistant khi phát triển và bảo trì codebase.
+2. **Agent Rules & Workflow** cấu hình quy trình làm việc chuẩn cho AI Coding Assistant khi phát triển và bảo trì codebase.
 
 ---
 
@@ -74,12 +74,12 @@ NGÔN NGỮ & PHONG CÁCH
 
 ---
 
-## 2. AGENT CONFIGURATION RULES
+## 2. AGENT CONFIGURATION RULES & WORKFLOW
 
-> Quy tắc cấu hình bắt buộc cho AI Coding Assistant khi phát triển mã nguồn dự án.
+> Quy tắc cấu hình và quy trình làm việc chuẩn bắt buộc cho AI Coding Assistant khi phát triển mã nguồn dự án.
 
 ```markdown
-# AGENT CONFIGURATION RULES: On-call & Codebase RAG Assistant
+# AGENT CONFIGURATION RULES & WORKFLOW
 
 1. TECH STACK BẮT BUỘC:
    - Python 3.11+
@@ -109,13 +109,25 @@ NGÔN NGỮ & PHONG CÁCH
    - Parser gặp file lỗi chỉ ghi logger.warning và skip, không crash pipeline.
    - Dùng logging stdlib, KHÔNG dùng print().
 
-4. LANGGRAPH WORKFLOW:
+4. QUY TRÌNH LÀM VIỆC BẮT BUỘC (MANDATORY AGENT WORKFLOW):
+   Mỗi khi hoàn thành một tính năng hoặc một giai đoạn (Phase), Agent BẮT BUỘC phải tuân thủ nghiêm ngặt quy trình 4 bước sau:
+   - Bước 1: Viết Unit Tests tương ứng trong thư mục `tests/`.
+   - Bước 2: CHẠY KIỂM THỬ: Thực thi toàn bộ test suite bằng lệnh:
+             pytest tests/ -v
+   - Bước 3: ĐỐI SOÁT & SỬA LỖI: Chỉ khi 100% các ca kiểm thử đạt kết quả PASSED (0 failures, 0 errors) mới được chuyển sang bước kế tiếp.
+   - Bước 4: GIT COMMIT & PUSH:
+             git add .
+             git commit -m "[Phase X] <Mô tả chi tiết tính năng đã hoàn thiện>"
+             git push origin main
+   - TUYỆT ĐỐI KHÔNG commit hay push mã nguồn lên Git khi chưa chạy kiểm thử hoặc khi kiểm thử còn thất bại.
+
+5. LANGGRAPH WORKFLOW:
    - 6 nodes bắt buộc: classify_and_parse -> multi_source_retrieval -> grade_context -> expand_dependencies -> generate_answer -> validate_citations.
    - expand_dependencies tối đa 3 iterations.
    - validate_citations: nếu phát hiện số dòng bị bịa đặt, tự động re-prompt generate_answer.
    - Nhiệt độ: 0 cho classify/grade, 0.3 cho generate.
 
-5. EVALUATION HARNESS:
+6. EVALUATION HARNESS:
    - Độc lập với API, chạy qua: PYTHONPATH=. python3 harness/runner.py
    - 4 metrics tất định: Intent Accuracy, File Retrieval Recall, Citation Precision, Culprit Commit Accuracy.
 ```
