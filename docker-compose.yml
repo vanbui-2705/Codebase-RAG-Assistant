@@ -1,6 +1,9 @@
 version: "3.8"
 
 services:
+  # ==========================================
+  # 1. Vector Database: Qdrant
+  # ==========================================
   qdrant:
     image: qdrant/qdrant:latest
     container_name: oncall_qdrant
@@ -13,7 +16,65 @@ services:
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
       - QDRANT__LOG_LEVEL=INFO
+    networks:
+      - oncall_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/readyz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # 2. Backend REST API: FastAPI
+  # ==========================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oncall_api
+    restart: unless-stopped
+    command: ["uvicorn", "src.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"    # OpenAPI Swagger Docs: http://localhost:8000/docs
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_GRPC_PORT=6334
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - oncall_net
+
+  # ==========================================
+  # 3. Interactive Web UI: Chainlit
+  # ==========================================
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oncall_ui
+    restart: unless-stopped
+    command: ["chainlit", "run", "ui/chainlit_app.py", "--host", "0.0.0.0", "--port", "8501", "--headless"]
+    ports:
+      - "8501:8501"    # Chat UI: http://localhost:8501
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    depends_on:
+      - qdrant
+      - api
+    networks:
+      - oncall_net
 
 volumes:
   qdrant_storage:
     driver: local
+
+networks:
+  oncall_net:
+    driver: bridge
