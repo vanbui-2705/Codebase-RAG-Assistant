@@ -48,3 +48,6 @@ htmlcov/
 
 # Qdrant local storage
 qdrant_storage/
+
+# Evaluation reports
+reports/
