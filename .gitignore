@@ -51,3 +51,6 @@ qdrant_storage/
 
 # Evaluation reports
 reports/
+
+# Chainlit local state
+.chainlit/
