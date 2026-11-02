@@ -22,6 +22,8 @@ def _load_grammar_safely(lang_module_name: str) -> Any | None:
         mod = __import__(lang_module_name)
         if hasattr(mod, "language"):
             return Language(mod.language())
+        elif hasattr(mod, "language_typescript"):
+            return Language(mod.language_typescript())
     except Exception as e:
         logger.debug(f"Không thể nạp Tree-sitter grammar '{lang_module_name}': {e}")
     return None
