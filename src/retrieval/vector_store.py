@@ -37,7 +37,8 @@ class QdrantStore(BaseVectorStore):
         settings = get_settings()
         self.host = host or settings.qdrant_host
         self.port = port or settings.qdrant_port
-        self.api_key = api_key or settings.qdrant_api_key
+        raw_key = api_key if api_key is not None else settings.qdrant_api_key
+        self.api_key = raw_key.strip() if (raw_key and raw_key.strip()) else None
         self.embedder = embedder or get_hybrid_embedder()
 
         # Kết nối tới Qdrant client (hỗ trợ cả :memory: cho testing)
@@ -50,6 +51,7 @@ class QdrantStore(BaseVectorStore):
                     host=self.host,
                     port=self.port,
                     api_key=self.api_key,
+                    https=False if self.api_key is None else None,
                     timeout=10.0,
                 )
                 logger.info(f"Kết nối thành công tới Qdrant tại {self.host}:{self.port}")

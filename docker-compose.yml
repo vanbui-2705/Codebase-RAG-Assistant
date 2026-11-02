@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ==========================================
   # 1. Vector Database: Qdrant
@@ -19,7 +17,7 @@ services:
     networks:
       - oncall_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/readyz || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -31,6 +29,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: rag_assitant-api
     container_name: oncall_api
     restart: unless-stopped
     command: ["uvicorn", "src.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
@@ -42,6 +41,11 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - QDRANT_GRPC_PORT=6334
+    volumes:
+      - ./src:/app/src
+      - ./ui:/app/ui
+      - ./Docs:/app/Docs
+      - ./harness:/app/harness
     depends_on:
       qdrant:
         condition: service_healthy
@@ -55,6 +59,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: rag_assitant-ui
     container_name: oncall_ui
     restart: unless-stopped
     command: ["chainlit", "run", "ui/chainlit_app.py", "--host", "0.0.0.0", "--port", "8501", "--headless"]
@@ -65,6 +70,11 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+    volumes:
+      - ./src:/app/src
+      - ./ui:/app/ui
+      - ./Docs:/app/Docs
+      - ./harness:/app/harness
     depends_on:
       - qdrant
       - api
