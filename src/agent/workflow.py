@@ -642,19 +642,28 @@ class OnCallAgentWorkflow:
 
     def _invoke_llm(self, prompt: str) -> str:
         """Thực thi gọi mô hình ngôn ngữ với hỗ trợ cả invoke lẫn callable wrapper."""
+        raw_res: Any = None
         if hasattr(self.llm, "invoke"):
-            response = self.llm.invoke(prompt)
-            if hasattr(response, "content"):
-                return str(response.content)
-            return str(response)
+            raw_res = self.llm.invoke(prompt)
         elif callable(self.llm):
-            response = self.llm(prompt)
-            if hasattr(response, "content"):
-                return str(response.content)
-            return str(response)
-        raise TypeError(
-            f"Mô hình LLM được truyền vào không hỗ trợ invoke hoặc call: {type(self.llm)}"
-        )
+            raw_res = self.llm(prompt)
+        else:
+            raise TypeError(
+                f"Mô hình LLM được truyền vào không hỗ trợ invoke hoặc call: {type(self.llm)}"
+            )
+
+        content = getattr(raw_res, "content", raw_res)
+        if isinstance(content, list):
+            texts: list[str] = []
+            for part in content:
+                if isinstance(part, dict) and "text" in part:
+                    texts.append(str(part["text"]))
+                elif isinstance(part, str):
+                    texts.append(part)
+                elif hasattr(part, "text"):
+                    texts.append(str(part.text))
+            return "\n".join(texts)
+        return str(content)
 
     def _extract_json(self, text: str) -> dict[str, Any] | None:
         """Trích xuất và parse JSON từ chuỗi văn bản (kể cả khi nằm trong Markdown code block)."""
