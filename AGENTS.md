@@ -255,10 +255,12 @@ Khi viết prompts cho LLM (trong `agent/workflow.py`):
 ## 9. Git Conventions
 
 - **Branch:** `feature/<phase>-<module>` (VD: `feature/phase1-code-parser`)
-- **Commit message:** Tiếng Việt hoặc Anh, format: `[Phase X] <mô tả ngắn>`
+- **Commit message:** Tiếng Việt hoặc Anh, format: `[Phase X] <mô tả ngắn>` hoặc `[Feature] <mô tả ngắn>`
   - VD: `[Phase 1] Implement TreeSitterCodeParser with Python support`
   - VD: `[Phase 2] Add QdrantStore hybrid search with RRF fusion`
-- **KHÔNG commit:** `.env`, `__pycache__/`, `*.pyc`, `.ruff_cache/`, model weights
+  - VD: `[Feature] Enable native Chainlit left sidebar for thread history`
+- **Tự động Commit & Push:** Mỗi khi hoàn thành và verify xong 1 feature/nhiệm vụ, BẮT BUỘC tự động chạy test, thực hiện `git add`, `git commit` và `git push origin main` ngay lập tức.
+- **KHÔNG commit:** `.env`, `__pycache__/`, `*.pyc`, `.ruff_cache/`, model weights, `data/*.db`
 
 ---
 
