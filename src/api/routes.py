@@ -82,9 +82,12 @@ class IncidentRCAResponse(BaseModel):
 
 
 class IngestFullRequest(BaseModel):
-    """Schema kích hoạt Full Indexing cho toàn bộ repository."""
+    """Schema kích hoạt Full Indexing cho repository cục bộ hoặc GitHub URL."""
 
-    repo_path: str = Field(..., description="Đường dẫn tới repository mã nguồn cần đánh chỉ mục")
+    repo_path: str = Field(
+        ...,
+        description="Đường dẫn thư mục repository cục bộ HOẶC GitHub URL (ví dụ: 'https://github.com/owner/repo')",
+    )
     docs_path: str | None = Field(
         default=None,
         description="Đường dẫn thư mục chứa runbook/tài liệu markdown (nếu nằm ngoài repo)",
@@ -363,6 +366,21 @@ async def ingest_full_repository(
     logger.info(f"Bắt đầu Full Indexing: repo={payload.repo_path}, docs={payload.docs_path}")
 
     try:
+        # Nếu truyền vào là một GitHub URL (https://github.com/...)
+        if payload.repo_path.startswith("http://") or payload.repo_path.startswith("https://"):
+            logger.info(f"Phát hiện GitHub URL: {payload.repo_path}. Bắt đầu clone và Full Indexing...")
+            git_res = pipeline.index_from_github_url(
+                repo_url=payload.repo_path,
+                docs_path=payload.docs_path,
+            )
+            return IngestFullResponse(
+                status="success",
+                indexed_summary={
+                    "code_nodes": git_res.get("code_nodes", 0),
+                    "doc_nodes": git_res.get("doc_nodes", 0),
+                },
+            )
+
         summary = pipeline.run_full_indexing(
             repo_path=payload.repo_path,
             docs_path=payload.docs_path,

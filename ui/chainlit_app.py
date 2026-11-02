@@ -159,13 +159,14 @@ async def on_chat_start():
     welcome_message = (
         "## 🛠️ On-call & Codebase RAG Assistant\n\n"
         "Hệ thống **Agentic RAG** chuyên biệt cho mã nguồn & on-call đã sẵn sàng:\n\n"
-        f"- {status_tag}\n"
+        f"- {status_tag}\n\n"
+        "### 📥 2 Cách nạp dữ liệu để RAG Chunking & Indexing:\n"
+        "1. 🌐 **Dán thẳng URL GitHub**: Dán link repo (VD: `https://github.com/owner/repo`) vào chat, hệ thống sẽ tự động clone, parse AST và chunking.\n"
+        "2. 📎 **Đính kèm File (Upload)**: Kéo thả file nén `.zip` của project hoặc các file mã nguồn rời (`.py`, `.ts`, `.go`, `.java`, `.md`...) vào nút kẹp ghim 📎 và bấm gửi để chunking.\n\n"
         "- 🔍 **Hỏi đáp kiến trúc**: Nhớ toàn bộ ngữ cảnh hội thoại đa lượt (*Multi-turn memory*).\n"
-        "- 🚨 **Chẩn đoán sự cố (RCA)**: Bóc tách lỗi stack trace, phân tích commit nghi vấn & runbook.\n"
-        "- ⚡ **Lệnh nhanh**:\n"
-        "  - `/clear`: Làm mới phiên trò chuyện (xóa ngữ cảnh cũ để đổi chủ đề).\n"
-        "  - `/index <đường_dẫn>`: Quét và nạp nhanh một repo bất kỳ vào Vector Database.\n\n"
-        "*(Hãy đặt câu hỏi kiến trúc hoặc dán log lỗi bên dưới để bắt đầu!)*"
+        "- 🚨 **Chẩn đoán sự cố (RCA)**: Dán stack trace để tìm commit nghi vấn & runbook.\n"
+        "- 🧹 **`/clear`**: Làm mới phiên hội thoại để bắt đầu chủ đề mới.\n\n"
+        "*(Hãy dán link GitHub, đính kèm file hoặc đặt câu hỏi bên dưới để bắt đầu!)*"
     )
 
     if not session_ready:
@@ -193,6 +194,7 @@ async def on_message(message: cl.Message):
     # 1. Đọc nội dung tin nhắn và các file đính kèm nếu có
     raw_text = message.content.strip()
     attached_contents: list[str] = []
+    attached_file_paths: list[Path] = []
 
     if message.elements:
         for element in message.elements:
@@ -200,6 +202,7 @@ async def on_message(message: cl.Message):
                 try:
                     file_path = Path(element.path)
                     if file_path.is_file():
+                        attached_file_paths.append(file_path)
                         content = file_path.read_text(encoding="utf-8", errors="ignore")
                         attached_contents.append(f"=== ĐÍNH KÈM: {element.name} ===\n{content}")
                 except Exception as exc:
@@ -212,8 +215,8 @@ async def on_message(message: cl.Message):
     else:
         full_input = raw_text
 
-    if not full_input:
-        await cl.Message(content="⚠️ Vui lòng nhập câu hỏi hoặc đính kèm file log sự cố.").send()
+    if not full_input and not attached_file_paths:
+        await cl.Message(content="⚠️ Vui lòng nhập câu hỏi, dán link GitHub hoặc đính kèm file mã nguồn.").send()
         return
 
     # Lệnh nhanh: /clear để reset ngữ cảnh
@@ -224,7 +227,95 @@ async def on_message(message: cl.Message):
         ).send()
         return
 
-    # Lệnh nhanh: /index <path> để nạp repo trực tiếp từ khung chat
+    # TRƯỜNG HỢP 1: TẢI FILE ĐÍNH KÈM ĐỂ CHUNKING (Upload file zip hoặc file mã nguồn để index)
+    has_zip = any(fp.suffix.lower() == ".zip" for fp in attached_file_paths)
+    is_upload_command = full_input.strip().lower().startswith("/upload") or has_zip or (
+        attached_file_paths and any(keyword in raw_text.lower() for keyword in ["chunk", "index", "nạp", "nap", "học", "tải"])
+    )
+
+    if is_upload_command and attached_file_paths:
+        indexing_msg = await cl.Message(
+            content="*<span style='opacity: 0.6;'>🔄 Đang giải nén, quét AST (Tree-sitter) và chunking các file tải lên...</span>*"
+        ).send()
+        try:
+            from src.ingestion.pipeline import IngestionPipeline
+            from src.ingestion.doc_parser import RunbookParser
+            embedder = get_hybrid_embedder()
+            vector_store = QdrantStore(embedder=embedder)
+            pipeline = IngestionPipeline(
+                code_parser=TreeSitterCodeParser(),
+                vector_store=vector_store,
+                doc_parser=RunbookParser(),
+                git_collector=GitHistoryCollector(),
+            )
+            summary = pipeline.index_uploaded_files(
+                files=attached_file_paths,
+                repo_name=cl.user_session.get("repo_name", "uploaded_project"),
+            )
+            await indexing_msg.remove()
+            await cl.Message(
+                content=(
+                    f"✅ **Đã phân tích AST và chunking thành công các file đính kèm!**\n\n"
+                    f"- 📁 **Mã nguồn (Code chunks):** `{summary.get('code_nodes', 0)}` chunks\n"
+                    f"- 📚 **Tài liệu (Docs/Runbooks):** `{summary.get('doc_nodes', 0)}` bản ghi\n\n"
+                    f"*Dữ liệu đã được nạp vào Vector DB Qdrant. Bây giờ bạn có thể đặt câu hỏi về các file này!*"
+                )
+            ).send()
+            return
+        except Exception as exc:
+            await indexing_msg.remove()
+            await cl.Message(content=f"❌ **Lỗi khi chunking file tải lên:** {exc}").send()
+            return
+
+    # TRƯỜNG HỢP 2: ĐƯA ĐƯỜNG DẪN REPO GITHUB (Dán link GitHub trực tiếp hoặc dùng /index <github_url>)
+    github_match = re.search(r"https?://github\.com/([\w\.-]+)/([\w\.-]+?)(?:\.git)?(?:/)?$", full_input.strip())
+    if not github_match and full_input.strip().startswith(("/index ", "/clone ")):
+        parts = full_input.strip().split(maxsplit=1)
+        if len(parts) > 1:
+            github_match = re.search(r"https?://github\.com/([\w\.-]+)/([\w\.-]+)", parts[1].strip())
+
+    if github_match:
+        repo_owner = github_match.group(1)
+        repo_slug = github_match.group(2)
+        repo_full_name = f"{repo_owner}/{repo_slug}"
+        github_url = f"https://github.com/{repo_full_name}"
+
+        indexing_msg = await cl.Message(
+            content=f"*<span style='opacity: 0.6;'>📥 Đang clone repository từ GitHub `{repo_full_name}` và thực hiện chunking AST...</span>*"
+        ).send()
+
+        try:
+            from src.ingestion.pipeline import IngestionPipeline
+            from src.ingestion.doc_parser import RunbookParser
+            embedder = get_hybrid_embedder()
+            vector_store = QdrantStore(embedder=embedder)
+            pipeline = IngestionPipeline(
+                code_parser=TreeSitterCodeParser(),
+                vector_store=vector_store,
+                doc_parser=RunbookParser(),
+                git_connector=GitHistoryCollector(),
+            )
+            res = pipeline.index_from_github_url(repo_url=github_url)
+            cl.user_session.set("repo_name", repo_full_name)
+            cl.user_session.set("chat_history", [])  # Reset phiên mới cho repo vừa clone
+
+            await indexing_msg.remove()
+            await cl.Message(
+                content=(
+                    f"🎉 **Đã clone và đánh chỉ mục thành công GitHub Repository!**\n\n"
+                    f"- 🔗 **Repository:** [{repo_full_name}]({github_url})\n"
+                    f"- 📁 **Mã nguồn (Code chunks):** `{res.get('code_nodes', 0)}` chunks\n"
+                    f"- 📚 **Lịch sử Git & PRs:** `{res.get('doc_nodes', 0)}` bản ghi\n\n"
+                    f"*Đã thiết lập phiên làm việc riêng cho repo `{repo_full_name}`. Hãy đặt câu hỏi bất kỳ về mã nguồn này!*"
+                )
+            ).send()
+            return
+        except Exception as exc:
+            await indexing_msg.remove()
+            await cl.Message(content=f"❌ **Lỗi khi clone & index repo từ GitHub:** {exc}").send()
+            return
+
+    # Lệnh nhanh: /index <thư_mục_local>
     if full_input.strip().lower().startswith("/index"):
         parts = full_input.strip().split(maxsplit=1)
         target_path = parts[1].strip() if len(parts) > 1 else "/app"
@@ -246,7 +337,10 @@ async def on_message(message: cl.Message):
                 doc_parser=RunbookParser(),
                 git_collector=GitHistoryCollector(),
             )
-            summary = pipeline.index_full(repo_path=target_path, docs_path=f"{target_path}/Docs" if Path(f"{target_path}/Docs").is_dir() else None)
+            summary = pipeline.run_full_indexing(
+                repo_path=target_path,
+                docs_path=f"{target_path}/Docs" if Path(f"{target_path}/Docs").is_dir() else None,
+            )
             await indexing_msg.remove()
             await cl.Message(
                 content=(

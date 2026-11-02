@@ -254,3 +254,55 @@ class GitHistoryCollector:
             logger.warning(f"Lỗi kết nối GitHub API khi lấy PRs ({repo_full_name}): {e}")
 
         return nodes
+
+    def clone_repository(self, repo_url: str, target_dir: str | None = None) -> str:
+        """
+        Clone một kho mã nguồn từ GitHub URL về máy cục bộ.
+        Tự động chèn GitHub Token nếu có để hỗ trợ các private repository.
+
+        Args:
+            repo_url: URL GitHub (ví dụ: 'https://github.com/owner/repo' hoặc 'https://github.com/owner/repo.git').
+            target_dir: Thư mục đích để lưu trữ mã nguồn (nếu None sẽ tự sinh trong temp_repos).
+
+        Returns:
+            Đường dẫn tuyệt đối tới thư mục repo đã clone.
+        """
+        import re
+        import tempfile
+        import shutil
+
+        clean_url = repo_url.strip()
+        # Chuẩn hóa tên repo
+        match = re.search(r"github\.com[/:]([\w\.-]+)/([\w\.-]+?)(?:\.git)?$", clean_url)
+        repo_name = f"{match.group(1)}_{match.group(2)}" if match else "cloned_repo"
+
+        if not target_dir:
+            base_dir = Path("/tmp/cloned_repos" if Path("/tmp").exists() else tempfile.gettempdir()) / "oncall_rag_repos"
+            base_dir.mkdir(parents=True, exist_ok=True)
+            target_path = base_dir / repo_name
+        else:
+            target_path = Path(target_dir).resolve()
+
+        auth_url = clean_url
+        if self.github_token and clean_url.startswith("https://"):
+            # Chèn token vào https://token@github.com/...
+            auth_url = clean_url.replace("https://", f"https://{self.github_token}@")
+
+        if target_path.exists() and (target_path / ".git").is_dir():
+            try:
+                logger.info(f"Repository đã tồn tại tại {target_path}. Đang tiến hành git pull...")
+                repo = git.Repo(str(target_path))
+                origin = repo.remotes.origin
+                origin.pull()
+                repo.close()
+                return str(target_path)
+            except Exception as exc:
+                logger.warning(f"Không thể git pull tại {target_path} ({exc}). Đang dọn dẹp và clone lại...")
+                shutil.rmtree(target_path, ignore_errors=True)
+
+        logger.info(f"Bắt đầu clone repository từ {clean_url} vào {target_path}...")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        repo = git.Repo.clone_from(auth_url, str(target_path), depth=50)
+        repo.close()
+        logger.info(f"Clone hoàn tất thành công: {target_path}")
+        return str(target_path)

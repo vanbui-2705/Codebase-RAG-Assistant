@@ -256,3 +256,114 @@ class IngestionPipeline:
                 continue
             valid_docs.append(path)
         return valid_docs
+
+    def index_from_github_url(
+        self,
+        repo_url: str,
+        docs_path: str | None = None,
+        target_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Tự động clone repository từ GitHub URL và kích hoạt Full Indexing:
+        - Hỗ trợ cả public lẫn private repository (tự chèn GitHub Token nếu có).
+        - Parse AST mã nguồn bằng Tree-sitter, trích xuất lịch sử commits & PRs.
+        - Nạp toàn bộ Named Vectors vào Qdrant.
+
+        Args:
+            repo_url: Đường dẫn GitHub (VD: 'https://github.com/owner/repo').
+            docs_path: Thư mục docs riêng biệt (nếu có).
+            target_dir: Thư mục clone (mặc định trong temp_repos).
+
+        Returns:
+            Thống kê kết quả: {"status": "success", "repo_full_name": ..., "cloned_path": ..., "code_nodes": X, "doc_nodes": Y}
+        """
+        import re
+        logger.info(f"=== BẮT ĐẦU INDEX TỪ GITHUB URL: {repo_url} ===")
+        # Bóc tách repo_full_name
+        match = re.search(r"github\.com[/:]([\w\.-]+)/([\w\.-]+?)(?:\.git)?$", repo_url.strip())
+        repo_full_name = f"{match.group(1)}/{match.group(2)}" if match else None
+
+        cloned_path = self.git_connector.clone_repository(repo_url, target_dir=target_dir)
+        summary = self.run_full_indexing(
+            repo_path=cloned_path,
+            docs_path=docs_path,
+            repo_full_name=repo_full_name,
+        )
+
+        return {
+            "status": "success",
+            "repo_url": repo_url,
+            "repo_full_name": repo_full_name or "unknown/repo",
+            "cloned_path": cloned_path,
+            "code_nodes": summary.get("code_nodes", 0),
+            "doc_nodes": summary.get("doc_nodes", 0),
+        }
+
+    def index_uploaded_files(
+        self,
+        files: list[str | Path],
+        repo_name: str = "uploaded_project",
+    ) -> dict[str, int]:
+        """
+        Đánh chỉ mục cho danh sách các file được người dùng tải lên (kể cả file nén .zip).
+        - Nếu gặp file .zip: tự động giải nén và quét toàn bộ thư mục bên trong.
+        - Nếu gặp các file mã nguồn rời (.py, .ts, .js, .go, .java): phân tích AST và chunking.
+        - Nếu gặp file .md: phân tích cú pháp runbook/tài liệu.
+
+        Args:
+            files: Danh sách đường dẫn các file đã lưu tạm trên máy chủ.
+            repo_name: Tên định danh cho tập file tải lên.
+
+        Returns:
+            Thống kê: {"code_nodes": X, "doc_nodes": Y}
+        """
+        import zipfile
+        import tempfile
+        import shutil
+
+        logger.info(f"=== BẮT ĐẦU INDEX TẬP FILE TẢI LÊN ({len(files)} files) ===")
+        code_nodes: list[CodeNode] = []
+        doc_nodes: list[IncidentDocNode] = []
+
+        for f_item in files:
+            p = Path(f_item).resolve()
+            if not p.is_file():
+                continue
+
+            # Xử lý trường hợp file ZIP nén toàn bộ project
+            if p.suffix.lower() == ".zip":
+                temp_extract_dir = Path(tempfile.gettempdir()) / f"extracted_{p.stem}"
+                temp_extract_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    logger.info(f"Phát hiện file ZIP: {p.name}. Đang giải nén vào {temp_extract_dir}...")
+                    with zipfile.ZipFile(str(p), "r") as zip_ref:
+                        zip_ref.extractall(str(temp_extract_dir))
+                    zip_summary = self.run_full_indexing(str(temp_extract_dir), repo_full_name=repo_name)
+                    return zip_summary
+                finally:
+                    pass
+
+            # Xử lý file mã nguồn đơn lẻ
+            suffix = p.suffix.lower()
+            if suffix in EXTENSION_LANGUAGE_MAP:
+                lang = EXTENSION_LANGUAGE_MAP[suffix]
+                nodes = self.code_parser.parse_file(str(p), language=lang)
+                for n in nodes:
+                    n.file_path = p.name
+                    n.repo_name = repo_name
+                code_nodes.extend(nodes)
+            elif suffix == ".md":
+                docs = self.doc_parser.parse_markdown(str(p))
+                doc_nodes.extend(docs)
+
+        if code_nodes:
+            logger.info(f"Nạp {len(code_nodes)} code chunks từ file tải lên vào Qdrant...")
+            self.vector_store.upsert_nodes("code_chunks", code_nodes)
+        if doc_nodes:
+            logger.info(f"Nạp {len(doc_nodes)} doc nodes từ file tải lên vào Qdrant...")
+            self.vector_store.upsert_nodes("incident_and_docs", doc_nodes)
+
+        return {
+            "code_nodes": len(code_nodes),
+            "doc_nodes": len(doc_nodes),
+        }
