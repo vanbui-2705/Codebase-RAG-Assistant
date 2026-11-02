@@ -10,6 +10,7 @@ Tuân thủ Clean Architecture: Tái sử dụng tầng Agent và Retrieval từ
 
 import logging
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from src.agent.workflow import OnCallAgentWorkflow
 from src.config.settings import get_settings
 from src.ingestion.code_parser import TreeSitterCodeParser
 from src.ingestion.git_connector import GitHistoryCollector
+from src.retrieval.chat_history_db import get_chat_history_db
 from src.retrieval.embedder import get_hybrid_embedder
 from src.retrieval.reranker import get_reranker
 from src.retrieval.vector_store import QdrantStore
@@ -132,7 +134,15 @@ async def on_chat_start():
     """Khởi tạo phiên trò chuyện Chainlit, nạp workflow và hiển thị hướng dẫn."""
     logger.info("Bắt đầu phiên làm việc mới trên Chainlit UI.")
 
-    # Khởi tạo workflow và lưu vào session
+    # 1. Khởi tạo Persistent Thread trong SQLite
+    chat_db = get_chat_history_db()
+    thread_id = cl.user_session.get("thread_id")
+    if not thread_id:
+        thread_id = str(uuid.uuid4())
+        cl.user_session.set("thread_id", thread_id)
+        cl.user_session.set("repo_name", "Codebase-RAG-Assistant")
+
+    # 2. Khởi tạo workflow và lưu vào session
     chunk_count = 0
     doc_count = 0
     try:
@@ -156,6 +166,34 @@ async def on_chat_start():
 
     status_tag = f"🟢 **Dữ liệu hiện có:** `{chunk_count}` code chunks, `{doc_count}` tài liệu/docs" if chunk_count > 0 else "🟡 **Chưa nạp dữ liệu:** Gõ `/index .` để nạp mã nguồn hiện tại!"
 
+    # 3. Lấy danh sách các phiên trò chuyện cũ từ SQLite (Persistent Sessions)
+    recent_threads = chat_db.list_threads(limit=10)
+    valid_threads = [
+        th for th in recent_threads
+        if th.get("message_count", 0) > 0 or th.get("title") not in ("Phiên trò chuyện mới", "Cuộc trò chuyện mới")
+    ]
+    history_actions: list[cl.Action] = []
+    history_summary_lines: list[str] = []
+
+    if valid_threads:
+        history_summary_lines.append("\n### 📜 Các phiên trò chuyện gần đây trong SQLite:")
+        for idx, th in enumerate(valid_threads[:4], 1):
+            t_title = th.get("title", "Không có tiêu đề")
+            t_repo = th.get("repo_name", "unknown")
+            t_id = th.get("thread_id", "")
+            t_cnt = th.get("message_count", 0)
+            t_time = th.get("updated_at", "")[:16].replace("T", " ")
+            history_summary_lines.append(f"- **#{idx}: {t_title}** *(Repo: `{t_repo}` | `{t_cnt}` tin nhắn | {t_time})*")
+            history_actions.append(
+                cl.Action(
+                    name="resume_thread",
+                    payload={"thread_id": t_id},
+                    label=f"👉 Mở #{idx}: {t_title[:20]}",
+                )
+            )
+
+    history_text = "\n".join(history_summary_lines) if history_summary_lines else ""
+
     welcome_message = (
         "## 🛠️ On-call & Codebase RAG Assistant\n\n"
         "Hệ thống **Agentic RAG** chuyên biệt cho mã nguồn & on-call đã sẵn sàng:\n\n"
@@ -163,9 +201,11 @@ async def on_chat_start():
         "### 📥 2 Cách nạp dữ liệu để RAG Chunking & Indexing:\n"
         "1. 🌐 **Dán thẳng URL GitHub**: Dán link repo (VD: `https://github.com/owner/repo`) vào chat, hệ thống sẽ tự động clone, parse AST và chunking.\n"
         "2. 📎 **Đính kèm File (Upload)**: Kéo thả file nén `.zip` của project hoặc các file mã nguồn rời (`.py`, `.ts`, `.go`, `.java`, `.md`...) vào nút kẹp ghim 📎 và bấm gửi để chunking.\n\n"
-        "- 🔍 **Hỏi đáp kiến trúc**: Nhớ toàn bộ ngữ cảnh hội thoại đa lượt (*Multi-turn memory*).\n"
-        "- 🚨 **Chẩn đoán sự cố (RCA)**: Dán stack trace để tìm commit nghi vấn & runbook.\n"
-        "- 🧹 **`/clear`**: Làm mới phiên hội thoại để bắt đầu chủ đề mới.\n\n"
+        "### 💾 Quản lý Phiên trò chuyện Bền vững (SQLite):\n"
+        "- 📜 **`/history`**: Xem toàn bộ danh sách phiên chat cũ và chọn mở lại.\n"
+        "- ✨ **`/new`**: Bắt đầu một phiên trò chuyện mới.\n"
+        "- 🧹 **`/clear`**: Xóa ngữ cảnh hiện tại để đổi chủ đề.\n"
+        f"{history_text}\n\n"
         "*(Hãy dán link GitHub, đính kèm file hoặc đặt câu hỏi bên dưới để bắt đầu!)*"
     )
 
@@ -174,7 +214,64 @@ async def on_chat_start():
             "\n\n⚠️ *Cảnh báo: Không thể kết nối dịch vụ backend. Vui lòng kiểm tra Docker.*"
         )
 
-    await cl.Message(content=welcome_message).send()
+    await cl.Message(
+        content=welcome_message,
+        actions=history_actions if history_actions else None,
+    ).send()
+
+
+async def _restore_thread_to_session(target_id: str) -> bool:
+    """Khôi phục ngữ cảnh và lịch sử hội thoại từ SQLite vào user session hiện tại."""
+    chat_db = get_chat_history_db()
+    thread = chat_db.get_thread(target_id)
+    if not thread:
+        # Tìm thử theo prefix thread_id hoặc từ khóa title
+        all_threads = chat_db.list_threads(limit=50)
+        matched = [
+            t for t in all_threads
+            if t["thread_id"].startswith(target_id) or target_id.lower() in t["title"].lower()
+        ]
+        if matched:
+            thread = matched[0]
+            target_id = thread["thread_id"]
+
+    if not thread:
+        await cl.Message(content=f"⚠️ Không tìm thấy phiên trò chuyện tương ứng với `{target_id}` trong SQLite.").send()
+        return False
+
+    messages = chat_db.get_thread_messages(target_id)
+    cl.user_session.set("thread_id", target_id)
+    cl.user_session.set("repo_name", thread.get("repo_name", "Codebase-RAG-Assistant"))
+
+    restored_history: list[dict[str, str]] = []
+    display_lines: list[str] = [
+        f"### 🔄 Đã khôi phục phiên: **{thread.get('title')}**\n"
+        f"- 🆔 **Thread ID:** `{target_id}`\n"
+        f"- 📁 **Repository:** `{thread.get('repo_name')}`\n"
+        f"- 💬 **Lịch sử:** `{len(messages)}` tin nhắn\n\n---"
+    ]
+
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        restored_history.append({"role": role, "content": content})
+        prefix = "👤 **Bạn:**" if role == "user" else "🤖 **Assistant:**"
+        snippet = content[:200] + ("..." if len(content) > 200 else "")
+        display_lines.append(f"{prefix} {snippet}\n")
+
+    cl.user_session.set("chat_history", restored_history[-12:])
+    display_lines.append("\n*Ngữ cảnh cũ đã được nạp lại vào bộ nhớ! Bạn có thể đặt câu hỏi tiếp theo ngay bây giờ.*")
+
+    await cl.Message(content="\n".join(display_lines)).send()
+    return True
+
+
+@cl.action_callback("resume_thread")
+async def on_resume_thread_action(action: cl.Action):
+    """Callback khi người dùng bấm nút mở lại phiên trò chuyện cũ từ SQLite."""
+    target_id = action.payload.get("thread_id")
+    if target_id:
+        await _restore_thread_to_session(target_id)
 
 
 @cl.on_message
@@ -227,6 +324,72 @@ async def on_message(message: cl.Message):
         ).send()
         return
 
+    # Lệnh nhanh: /new để tạo phiên mới
+    if full_input.strip().lower() in ("/new", "/newchat", "/reset"):
+        chat_db = get_chat_history_db()
+        new_thread_id = str(uuid.uuid4())
+        repo_name = cl.user_session.get("repo_name", "Codebase-RAG-Assistant")
+        chat_db.create_thread(
+            thread_id=new_thread_id,
+            repo_name=repo_name,
+            title="Phiên trò chuyện mới",
+        )
+        cl.user_session.set("thread_id", new_thread_id)
+        cl.user_session.set("chat_history", [])
+        await cl.Message(
+            content=(
+                f"✨ **Đã tạo phiên trò chuyện mới trong SQLite!**\n\n"
+                f"- 🆔 **Thread ID:** `{new_thread_id}`\n"
+                f"- 📁 **Repository:** `{repo_name}`\n\n"
+                f"*Bạn có thể bắt đầu đặt câu hỏi hoặc nạp mã nguồn ngay bây giờ.*"
+            )
+        ).send()
+        return
+
+    # Lệnh nhanh: /history để xem danh sách các phiên trò chuyện cũ
+    if full_input.strip().lower() in ("/history", "/sessions", "/threads"):
+        chat_db = get_chat_history_db()
+        threads = chat_db.list_threads(limit=10)
+        valid_threads = [
+            th for th in threads
+            if th.get("message_count", 0) > 0 or th.get("title") not in ("Phiên trò chuyện mới", "Cuộc trò chuyện mới")
+        ]
+        if not valid_threads:
+            await cl.Message(content="📭 Chưa có phiên trò chuyện nào được lưu trong SQLite.").send()
+            return
+
+        current_thread_id = cl.user_session.get("thread_id")
+        history_actions: list[cl.Action] = []
+        msg_lines = ["### 📜 Danh sách các phiên trò chuyện đã lưu trong SQLite:\n"]
+        for idx, th in enumerate(valid_threads, 1):
+            t_id = th.get("thread_id", "")
+            t_title = th.get("title", "Không có tiêu đề")
+            t_repo = th.get("repo_name", "unknown")
+            t_cnt = th.get("message_count", 0)
+            t_time = th.get("updated_at", "")[:16].replace("T", " ")
+            active_mark = " *(Đang mở)*" if t_id == current_thread_id else ""
+            msg_lines.append(f"- **#{idx}: {t_title}**{active_mark}\n  *(Repo: `{t_repo}` | `{t_cnt}` tin nhắn | ID: `{t_id[:8]}...` | Cập nhật: {t_time})*")
+            if t_id != current_thread_id:
+                history_actions.append(
+                    cl.Action(
+                        name="resume_thread",
+                        payload={"thread_id": t_id},
+                        label=f"👉 Mở #{idx}: {t_title[:20]}",
+                    )
+                )
+        msg_lines.append("\n*Bấm vào các nút bên dưới hoặc gõ `/resume <thread_id>` để mở lại phiên.*")
+        await cl.Message(content="\n".join(msg_lines), actions=history_actions if history_actions else None).send()
+        return
+
+    # Lệnh nhanh: /resume <thread_id>
+    if full_input.strip().lower().startswith("/resume"):
+        parts = full_input.strip().split(maxsplit=1)
+        if len(parts) > 1:
+            await _restore_thread_to_session(parts[1].strip())
+        else:
+            await cl.Message(content="⚠️ Vui lòng cung cấp mã phiên: `/resume <thread_id>` hoặc dùng lệnh `/history` để chọn.").send()
+        return
+
     # TRƯỜNG HỢP 1: TẢI FILE ĐÍNH KÈM ĐỂ CHUNKING (Upload file zip hoặc file mã nguồn để index)
     has_zip = any(fp.suffix.lower() == ".zip" for fp in attached_file_paths)
     is_upload_command = full_input.strip().lower().startswith("/upload") or has_zip or (
@@ -247,16 +410,28 @@ async def on_message(message: cl.Message):
                 doc_parser=RunbookParser(),
                 git_collector=GitHistoryCollector(),
             )
+            uploaded_repo = cl.user_session.get("repo_name", "uploaded_project")
             summary = pipeline.index_uploaded_files(
                 files=attached_file_paths,
-                repo_name=cl.user_session.get("repo_name", "uploaded_project"),
+                repo_name=uploaded_repo,
+            )
+            # Tạo phiên làm việc mới riêng cho project vừa tải lên
+            new_thread_id = str(uuid.uuid4())
+            cl.user_session.set("thread_id", new_thread_id)
+            cl.user_session.set("chat_history", [])
+            chat_db = get_chat_history_db()
+            chat_db.create_thread(
+                thread_id=new_thread_id,
+                repo_name=uploaded_repo,
+                title=f"Hỏi đáp {uploaded_repo}",
             )
             await indexing_step.remove()
             await cl.Message(
                 content=(
                     f"✅ **Đã phân tích AST và chunking thành công các file đính kèm!**\n\n"
                     f"- 📁 **Mã nguồn (Code chunks):** `{summary.get('code_nodes', 0)}` chunks\n"
-                    f"- 📚 **Tài liệu (Docs/Runbooks):** `{summary.get('doc_nodes', 0)}` bản ghi\n\n"
+                    f"- 📚 **Tài liệu (Docs/Runbooks):** `{summary.get('doc_nodes', 0)}` bản ghi\n"
+                    f"- 💾 **Phiên SQLite:** Đã tạo thread riêng `{new_thread_id[:8]}...` cho `{uploaded_repo}`\n\n"
                     f"*Dữ liệu đã được nạp vào Vector DB Qdrant. Bây giờ bạn có thể đặt câu hỏi về các file này!*"
                 )
             ).send()
@@ -297,13 +472,24 @@ async def on_message(message: cl.Message):
             cl.user_session.set("repo_name", repo_full_name)
             cl.user_session.set("chat_history", [])  # Reset phiên mới cho repo vừa clone
 
+            # Tạo thread mới trong SQLite gắn với repo vừa nạp
+            new_thread_id = str(uuid.uuid4())
+            cl.user_session.set("thread_id", new_thread_id)
+            chat_db = get_chat_history_db()
+            chat_db.create_thread(
+                thread_id=new_thread_id,
+                repo_name=repo_full_name,
+                title=f"Phân tích {repo_full_name}",
+            )
+
             await indexing_step.remove()
             await cl.Message(
                 content=(
                     f"🎉 **Đã clone và đánh chỉ mục thành công GitHub Repository!**\n\n"
                     f"- 🔗 **Repository:** [{repo_full_name}]({github_url})\n"
                     f"- 📁 **Mã nguồn (Code chunks):** `{res.get('code_nodes', 0)}` chunks\n"
-                    f"- 📚 **Lịch sử Git & PRs:** `{res.get('doc_nodes', 0)}` bản ghi\n\n"
+                    f"- 📚 **Lịch sử Git & PRs:** `{res.get('doc_nodes', 0)}` bản ghi\n"
+                    f"- 💾 **Phiên SQLite:** Đã khởi tạo thread riêng `{new_thread_id[:8]}...`\n\n"
                     f"*Đã thiết lập phiên làm việc riêng cho repo `{repo_full_name}`. Hãy đặt câu hỏi bất kỳ về mã nguồn này!*"
                 )
             ).send()
@@ -352,7 +538,30 @@ async def on_message(message: cl.Message):
             await cl.Message(content=f"❌ **Lỗi khi nạp chỉ mục:** {exc}").send()
         return
 
-    # 2. Tự động nhận diện sự cố (Incident RCA) hay Hỏi đáp kiến trúc (Codebase QA)
+    # 2. Quản lý Thread ID và lưu trữ câu hỏi người dùng vào SQLite
+    chat_db = get_chat_history_db()
+    thread_id = cl.user_session.get("thread_id")
+    repo_name = cl.user_session.get("repo_name", "Codebase-RAG-Assistant")
+    if not thread_id:
+        thread_id = str(uuid.uuid4())
+        cl.user_session.set("thread_id", thread_id)
+
+    # Kiểm tra hoặc tạo mới thread trong SQLite
+    thread_info = chat_db.get_thread(thread_id)
+    clean_title = " ".join(full_input.split())[:45]
+    if not thread_info:
+        chat_db.create_thread(
+            thread_id=thread_id,
+            repo_name=repo_name,
+            title=clean_title or "Phiên trò chuyện",
+        )
+    elif thread_info.get("title") in ("Phiên trò chuyện mới", "Cuộc trò chuyện mới", "New Chat", ""):
+        chat_db.update_thread_title(thread_id, clean_title)
+
+    # Lưu tin nhắn người dùng vào SQLite
+    chat_db.add_message(thread_id=thread_id, role="user", content=full_input)
+
+    # 3. Tự động nhận diện sự cố (Incident RCA) hay Hỏi đáp kiến trúc (Codebase QA)
     is_stack_trace = _detect_is_stack_trace(full_input)
     task_mode = "incident_rca" if is_stack_trace else "codebase_qa"
 
@@ -365,7 +574,7 @@ async def on_message(message: cl.Message):
     # Lấy lịch sử hội thoại của session hiện tại (Multi-turn memory)
     chat_history: list[dict[str, str]] = cl.user_session.get("chat_history", [])
 
-    # 3. Chuẩn bị state ban đầu cho đồ thị LangGraph
+    # 4. Chuẩn bị state ban đầu cho đồ thị LangGraph
     initial_state: AgentGraphState = {
         "raw_input": full_input,
         "task_type": task_mode,
@@ -378,13 +587,13 @@ async def on_message(message: cl.Message):
         "citation_valid": True,
         "citation_error": None,
         "final_response": "",
-        "repo_name": cl.user_session.get("repo_name", "Codebase-RAG-Assistant"),
+        "repo_name": repo_name,
         "chat_history": list(chat_history),
     }
 
     current_state: dict[str, Any] = dict(initial_state)
 
-    # 4. Hiển thị thanh tiến trình chạy ngầm duy nhất (Status Indicator)
+    # 5. Hiển thị thanh tiến trình chạy ngầm duy nhất (Status Indicator)
     status_step = cl.Step(name="🔍 Đang phân loại ý định & bóc tách cú pháp...", type="run")
     await status_step.send()
 
@@ -514,6 +723,25 @@ async def on_message(message: cl.Message):
     updated_history.append({"role": "assistant", "content": final_raw_response})
     # Giữ tối đa 12 lượt gần nhất để tránh tràn context
     cl.user_session.set("chat_history", updated_history[-12:])
+
+    # Lưu tin nhắn Assistant và citations vào SQLite
+    citations_to_save: list[str] = []
+    for m in CITATION_REGEX.finditer(final_raw_response):
+        citations_to_save.append(m.group(1))
+    for ctx in code_contexts:
+        fp = getattr(ctx, "file_path", "")
+        sl = getattr(ctx, "start_line", 1) or 1
+        el = getattr(ctx, "end_line", sl) or sl
+        if fp:
+            citations_to_save.append(f"{fp}:L{sl}-L{el}")
+    unique_citations = list(dict.fromkeys(citations_to_save))
+
+    chat_db.add_message(
+        thread_id=thread_id,
+        role="assistant",
+        content=final_raw_response,
+        citations=unique_citations[:10],
+    )
 
     await cl.Message(
         content=response_text,

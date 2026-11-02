@@ -54,3 +54,8 @@ reports/
 
 # Chainlit local state
 .chainlit/
+
+# Local SQLite databases
+data/*.db
+data/*.sqlite
+
