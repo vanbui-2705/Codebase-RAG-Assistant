@@ -742,8 +742,8 @@ async def on_message(message: cl.Message):
 
     thinking_details = ""
     if thought_logs:
-        log_items = "\n".join(f"- {log}" for log in thought_logs)
-        thinking_details = f"\n\n<details>\n<summary>🧠 <i>Chi tiết tiến trình suy luận (Thinking)</i></summary>\n\n{log_items}\n\n</details>"
+        log_items = "\n".join(f"> - {log}" for log in thought_logs)
+        thinking_details = f"\n\n---\n> 🧠 **Tiến trình suy luận (Thinking):**\n{log_items}"
 
     response_text = f"{status_badge}\n\n---\n\n{highlighted_response}{thinking_details}"
 

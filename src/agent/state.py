@@ -42,3 +42,4 @@ class AgentGraphState(TypedDict):
     final_response: str
     repo_name: str | None
     chat_history: list[dict[str, str]]
+    has_new_contexts: bool | None

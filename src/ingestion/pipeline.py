@@ -30,6 +30,8 @@ SKIP_DIRS = {
     "dist",
     "build",
     "qdrant_storage",
+    "tests",
+    "harness",
     ".idea",
     ".vscode",
 }

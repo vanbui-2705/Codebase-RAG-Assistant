@@ -277,18 +277,19 @@ class OnCallAgentWorkflow:
         Nếu thiếu các hàm liên quan trong Call Graph, đề xuất bổ sung symbol.
         """
         code_contexts = state.get("code_contexts", [])
+        incident_contexts = state.get("incident_contexts", [])
         raw_input = state.get("raw_input", "")
         error_signature = state.get("error_signature")
         existing_symbols = list(state.get("extracted_symbols", []))
 
         logger.info(
             f"Node 3 [grade_context]: Đang chấm điểm độ đầy đủ ngữ cảnh "
-            f"({len(code_contexts)} chunks, {len(existing_symbols)} symbols)..."
+            f"({len(code_contexts)} code chunks, {len(incident_contexts)} docs, {len(existing_symbols)} symbols)..."
         )
 
-        # Nếu không có code context nào được tìm thấy
-        if not code_contexts:
-            logger.info("Ngữ cảnh mã nguồn trống -> Cần mở rộng hoặc fallback.")
+        # Nếu hoàn toàn không có context nào (cả code lẫn docs)
+        if not code_contexts and not incident_contexts:
+            logger.info("Ngữ cảnh trống hoàn toàn -> Cần mở rộng hoặc fallback.")
             return {
                 "is_sufficient": False,
                 "extracted_symbols": existing_symbols,
@@ -303,7 +304,16 @@ class OnCallAgentWorkflow:
                 else "unknown lines"
             )
             sym = f" ({ctx.symbol_name})" if ctx.symbol_name else ""
-            context_summary_lines.append(f"- [{ctx.file_path}:{lines}]{sym}")
+            context_summary_lines.append(f"- [CODE: {ctx.file_path}:{lines}]{sym}")
+
+        for ctx in incident_contexts:
+            lines = (
+                f"L{ctx.start_line}-L{ctx.end_line}"
+                if ctx.start_line is not None
+                else "unknown lines"
+            )
+            title = f" ({ctx.symbol_name})" if ctx.symbol_name else ""
+            context_summary_lines.append(f"- [DOC/{ctx.source_type}: {ctx.file_path}:{lines}]{title}")
 
         context_summary = "\n".join(context_summary_lines)
 
@@ -402,6 +412,7 @@ class OnCallAgentWorkflow:
         return {
             "code_contexts": current_code_contexts + new_contexts,
             "iteration_count": iteration_count,
+            "has_new_contexts": len(new_contexts) > 0,
         }
 
     def generate_answer_node(self, state: AgentGraphState) -> dict[str, Any]:
@@ -557,6 +568,15 @@ class OnCallAgentWorkflow:
         """
         is_sufficient = state.get("is_sufficient", True)
         iteration_count = state.get("iteration_count", 0)
+        has_new_contexts = state.get("has_new_contexts", True)
+
+        # Nếu đã qua 1 lần mở rộng mà không tìm thấy symbol/context mới nào, dừng lặp ngay
+        if iteration_count > 0 and not has_new_contexts:
+            logger.info(
+                "Conditional Edge 1: Mở rộng Call Graph không tìm thấy symbol mới nào. "
+                "Dừng vòng lặp và rẽ nhánh sang 'generate_answer'."
+            )
+            return "generate_answer"
 
         if not is_sufficient and iteration_count < self.max_iterations:
             logger.info(

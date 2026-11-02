@@ -6,6 +6,7 @@ Tuân thủ Clean Architecture: Phụ thuộc vào src.domain và src.config.
 """
 from functools import lru_cache
 import logging
+import re
 from typing import Any
 
 from src.config.settings import get_settings
@@ -81,30 +82,83 @@ class CrossEncoderReranker(BaseReranker):
         else:
             self._compute_fallback_scores(query, contexts)
 
-        # Sắp xếp giảm dần theo điểm score và lấy top_k
+        # Sắp xếp giảm dần theo điểm score
         ranked_contexts = sorted(contexts, key=lambda c: c.score, reverse=True)
-        return ranked_contexts[:top_k]
+
+        # Loại bỏ các chunk trùng lặp (cùng file_path và dải dòng)
+        deduped: list[RetrievedContext] = []
+        seen_spans: set[tuple[str, int | None, int | None]] = set()
+        for ctx in ranked_contexts:
+            key = (ctx.file_path, ctx.start_line, ctx.end_line)
+            if key not in seen_spans:
+                seen_spans.add(key)
+                deduped.append(ctx)
+
+        return deduped[:top_k]
 
     def _compute_fallback_scores(self, query: str, contexts: list[RetrievedContext]) -> None:
-        """Tính điểm tương tác giữa query và content bằng thuật toán overlap mở rộng khi chạy offline/test."""
-        query_terms = set(query.lower().split())
+        """
+        Tính điểm tương tác giữa query và content bằng thuật toán overlap mở rộng khi chạy offline/test:
+        - Lọc bỏ stop words tiếng Việt (các, ở, từ, nằm, nào, là, của...).
+        - Mở rộng từ đồng nghĩa chuyên ngành kỹ thuật (chunking <-> split/parse, tài liệu <-> doc/runbook).
+        - Ưu tiên matching chính xác theo symbol_name và file_path.
+        - Hạ điểm các file kiểm thử (harness, tests) khi tìm kiếm logic nghiệp vụ.
+        """
+        vietnamese_stopwords = {
+            "các", "ở", "từ", "nằm", "nào", "là", "cho", "của", "trong", "với", "và",
+            "những", "cái", "gì", "sao", "đâu", "được", "ra", "vào", "lại", "này", "thì",
+            "đã", "sẽ", "đang", "bị", "bởi", "làm", "rồi", "khi", "có", "không", "một",
+            "như", "để", "về", "thế", "đó", "ngay", "hãy", "hết", "file", "hỏi", "biết"
+        }
+
+        synonym_map = {
+            "chunking": ["chunk", "chunking", "split", "parse", "parser", "tách", "phân tách", "bóc tách"],
+            "chunk": ["chunk", "chunking", "split", "parse", "parser", "tách", "phân tách"],
+            "tài": ["doc", "runbook", "markdown", "tài liệu", "document", "docs"],
+            "liệu": ["doc", "runbook", "markdown", "tài liệu", "document", "docs"],
+            "kiến": ["node", "docnode", "kiến thức", "knowledge"],
+            "thức": ["node", "docnode", "kiến thức", "knowledge"],
+            "parse": ["parse", "parser", "parsing", "ast", "tree_sitter", "bóc tách"],
+            "ingest": ["ingest", "ingestion", "pipeline", "indexing", "nạp"],
+            "retrieval": ["retrieval", "search", "hybrid", "truy xuất", "tìm kiếm"],
+            "embed": ["embed", "embedding", "vector", "dense", "sparse", "nhúng"],
+        }
+
+        raw_terms = re.findall(r"\w+", query.lower())
+        meaningful_terms = [t for t in raw_terms if t not in vietnamese_stopwords and len(t) > 1]
+        if not meaningful_terms:
+            meaningful_terms = raw_terms
+
+        is_asking_function = any(k in query.lower() for k in ("hàm", "function", "method", "phương thức"))
 
         for ctx in contexts:
             content_lower = ctx.content.lower()
-            overlap_count = sum(1 for term in query_terms if term in content_lower)
+            fp_lower = (ctx.file_path or "").lower()
+            sym_lower = (ctx.symbol_name or "").lower()
+            stype = getattr(ctx, "source_type", "")
 
-            # Ưu tiên nếu tên symbol xuất hiện trực tiếp trong query
-            symbol_bonus = 0.0
-            if ctx.symbol_name and ctx.symbol_name.lower() in query.lower():
-                symbol_bonus = 2.0
+            score = 0.0
+            for term in meaningful_terms:
+                expansions = synonym_map.get(term, [term])
+                matched_content = any(exp in content_lower for exp in expansions)
+                matched_sym = any(exp in sym_lower for exp in expansions)
+                matched_fp = any(exp in fp_lower for exp in expansions)
 
-            # Ưu tiên nếu file_path xuất hiện trong query
-            file_bonus = 0.0
-            if ctx.file_path and ctx.file_path.lower() in query.lower():
-                file_bonus = 1.5
+                if matched_content:
+                    score += 1.5
+                if matched_sym:
+                    score += 4.5
+                if matched_fp:
+                    score += 3.5
 
-            base_score = float(overlap_count) / max(1, len(query_terms))
-            ctx.score = base_score + symbol_bonus + file_bonus
+            if is_asking_function and stype in ("function", "method"):
+                score += 3.0
+
+            # Hạ điểm các file kiểm thử và harness để ưu tiên code triển khai thực tế trong src/
+            if fp_lower.startswith(("harness/", "tests/")):
+                score *= 0.2
+
+            ctx.score = score
 
 
 @lru_cache(maxsize=1)
