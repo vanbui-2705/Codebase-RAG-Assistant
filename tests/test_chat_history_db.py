@@ -55,3 +55,33 @@ def test_list_and_delete_threads(temp_db: ChatHistoryDB):
     assert deleted is True
     assert temp_db.get_thread(t1) is None
     assert len(temp_db.list_threads()) == 1
+
+
+@pytest.mark.asyncio
+async def test_chainlit_data_layer_integration(temp_db: ChatHistoryDB):
+    from src.retrieval.chat_history_db import SQLiteChainlitDataLayer
+    from chainlit.types import Pagination, ThreadFilter
+    from chainlit.user import User
+
+    layer = SQLiteChainlitDataLayer(db=temp_db)
+    user = await layer.get_user("developer")
+    assert user is not None
+    assert user.identifier == "developer"
+
+    # Tạo thread và message
+    t_id = temp_db.create_thread(repo_name="my_test_repo", title="Cuộc trò chuyện thử nghiệm")
+    temp_db.add_message(t_id, role="user", content="Test question")
+    temp_db.add_message(t_id, role="assistant", content="Test answer")
+
+    # Kiểm tra list_threads
+    res = await layer.list_threads(pagination=Pagination(first=10), filters=ThreadFilter(userId="developer"))
+    assert len(res.data) == 1
+    assert res.data[0]["id"] == t_id
+    assert res.data[0]["name"] == "Cuộc trò chuyện thử nghiệm"
+
+    # Kiểm tra get_thread
+    thread_dict = await layer.get_thread(t_id)
+    assert thread_dict is not None
+    assert len(thread_dict["steps"]) == 2
+    assert thread_dict["steps"][0]["output"] == "Test question"
+    assert thread_dict["steps"][1]["output"] == "Test answer"

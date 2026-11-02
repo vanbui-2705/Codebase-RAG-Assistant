@@ -40,6 +40,7 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET:-oncall-codebase-rag-secret-key-32chars-min}
       - QDRANT_GRPC_PORT=6334
     volumes:
       - ./src:/app/src
@@ -71,6 +72,7 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET:-oncall-codebase-rag-secret-key-32chars-min}
     volumes:
       - ./src:/app/src
       - ./ui:/app/ui

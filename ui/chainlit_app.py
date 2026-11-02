@@ -22,7 +22,7 @@ from src.agent.workflow import OnCallAgentWorkflow
 from src.config.settings import get_settings
 from src.ingestion.code_parser import TreeSitterCodeParser
 from src.ingestion.git_connector import GitHistoryCollector
-from src.retrieval.chat_history_db import get_chat_history_db
+from src.retrieval.chat_history_db import SQLiteChainlitDataLayer, get_chat_history_db
 from src.retrieval.embedder import get_hybrid_embedder
 from src.retrieval.reranker import get_reranker
 from src.retrieval.vector_store import QdrantStore
@@ -129,6 +129,43 @@ def _init_agent_workflow() -> Any:
     return workflow_engine.compile_graph()
 
 
+@cl.data_layer
+def custom_data_layer():
+    """Đăng ký SQLite Data Layer để Chainlit hiển thị Sidebar lịch sử bên trái."""
+    return SQLiteChainlitDataLayer()
+
+
+@cl.header_auth_callback
+async def header_auth_callback(headers: dict):
+    """Tự động xác thực tài khoản cục bộ cho người dùng không cần gõ mật khẩu."""
+    return cl.User(identifier="developer", metadata={"role": "admin"})
+
+
+@cl.on_chat_resume
+async def on_chat_resume(thread: dict):
+    """Callback kích hoạt khi người dùng bấm vào một phiên trò chuyện ở Sidebar bên trái."""
+    thread_id = thread.get("id")
+    if not thread_id:
+        return
+
+    cl.user_session.set("thread_id", thread_id)
+    meta = thread.get("metadata") or {}
+    repo_name = meta.get("repo_name", "Codebase-RAG-Assistant")
+    cl.user_session.set("repo_name", repo_name)
+
+    # Nạp lại ngữ cảnh lịch sử hội thoại cho Workflow
+    restored_history: list[dict[str, str]] = []
+    for step in thread.get("steps", []):
+        stype = step.get("type")
+        content = step.get("output", "")
+        if stype in ("user_message", "assistant_message") and content:
+            role = "user" if stype == "user_message" else "assistant"
+            restored_history.append({"role": role, "content": content})
+
+    cl.user_session.set("chat_history", restored_history[-12:])
+    logger.info(f"Đã khôi phục phiên trò chuyện từ Sidebar: {thread_id} ({len(restored_history)} tin nhắn)")
+
+
 @cl.on_chat_start
 async def on_chat_start():
     """Khởi tạo phiên trò chuyện Chainlit, nạp workflow và hiển thị hướng dẫn."""
@@ -164,9 +201,9 @@ async def on_chat_start():
         logger.error(f"Lỗi khởi tạo Agent Workflow trong UI: {exc}", exc_info=True)
         session_ready = False
 
-    status_tag = f"🟢 **Dữ liệu hiện có:** `{chunk_count}` code chunks, `{doc_count}` tài liệu/docs" if chunk_count > 0 else "🟡 **Chưa nạp dữ liệu:** Gõ `/index .` để nạp mã nguồn hiện tại!"
+    status_tag = f"🟢 **Dữ liệu hiện có:** `{chunk_count}` code chunks, `{doc_count}` tài liệu/docs" if chunk_count > 0 else "🟡 **Chưa nạp dữ liệu:** Nạp mã nguồn bằng cách dán URL GitHub hoặc đính kèm file!"
 
-    # 3. Lấy danh sách các phiên trò chuyện cũ từ SQLite (Persistent Sessions)
+    # 3. Lấy danh sách các phiên trò chuyện cũ từ SQLite
     recent_threads = chat_db.list_threads(limit=10)
     valid_threads = [
         th for th in recent_threads
@@ -176,14 +213,14 @@ async def on_chat_start():
     history_summary_lines: list[str] = []
 
     if valid_threads:
-        history_summary_lines.append("\n### 📜 Các phiên trò chuyện gần đây trong SQLite:")
+        history_summary_lines.append("\n### 📜 Cuộc trò chuyện gần đây:")
         for idx, th in enumerate(valid_threads[:4], 1):
             t_title = th.get("title", "Không có tiêu đề")
             t_repo = th.get("repo_name", "unknown")
             t_id = th.get("thread_id", "")
             t_cnt = th.get("message_count", 0)
             t_time = th.get("updated_at", "")[:16].replace("T", " ")
-            history_summary_lines.append(f"- **#{idx}: {t_title}** *(Repo: `{t_repo}` | `{t_cnt}` tin nhắn | {t_time})*")
+            history_summary_lines.append(f"- **{t_title}** *(Repo: `{t_repo}` | `{t_cnt}` tin nhắn | {t_time})*")
             history_actions.append(
                 cl.Action(
                     name="resume_thread",
@@ -199,12 +236,11 @@ async def on_chat_start():
         "Hệ thống **Agentic RAG** chuyên biệt cho mã nguồn & on-call đã sẵn sàng:\n\n"
         f"- {status_tag}\n\n"
         "### 📥 2 Cách nạp dữ liệu để RAG Chunking & Indexing:\n"
-        "1. 🌐 **Dán thẳng URL GitHub**: Dán link repo (VD: `https://github.com/owner/repo`) vào chat, hệ thống sẽ tự động clone, parse AST và chunking.\n"
+        "1. 🌐 **Dán thẳng URL GitHub**: Dán link repo (VD: `https://github.com/owner/repo`) vào khung chat, hệ thống tự động clone, parse AST và chunking.\n"
         "2. 📎 **Đính kèm File (Upload)**: Kéo thả file nén `.zip` của project hoặc các file mã nguồn rời (`.py`, `.ts`, `.go`, `.java`, `.md`...) vào nút kẹp ghim 📎 và bấm gửi để chunking.\n\n"
-        "### 💾 Quản lý Phiên trò chuyện Bền vững (SQLite):\n"
-        "- 📜 **`/history`**: Xem toàn bộ danh sách phiên chat cũ và chọn mở lại.\n"
-        "- ✨ **`/new`**: Bắt đầu một phiên trò chuyện mới.\n"
-        "- 🧹 **`/clear`**: Xóa ngữ cảnh hiện tại để đổi chủ đề.\n"
+        "### 📜 Lịch sử các phiên trò chuyện (Menu bên trái):\n"
+        "- 👈 **Sidebar bên trái:** Bấm trực tiếp vào các cuộc trò chuyện trên **Menu bên trái** để mở lại lịch sử và hỏi đáp tiếp.\n"
+        "- ➕ **Nút '+ New Chat':** Nằm ở phía trên Menu bên trái để tạo cuộc trò chuyện mới bất kỳ lúc nào.\n"
         f"{history_text}\n\n"
         "*(Hãy dán link GitHub, đính kèm file hoặc đặt câu hỏi bên dưới để bắt đầu!)*"
     )
