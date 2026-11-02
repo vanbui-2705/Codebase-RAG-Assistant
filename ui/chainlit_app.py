@@ -234,9 +234,8 @@ async def on_message(message: cl.Message):
     )
 
     if is_upload_command and attached_file_paths:
-        indexing_msg = await cl.Message(
-            content="*<span style='opacity: 0.6;'>🔄 Đang giải nén, quét AST (Tree-sitter) và chunking các file tải lên...</span>*"
-        ).send()
+        indexing_step = cl.Step(name="🔄 Đang giải nén, quét AST và chunking các file tải lên...", type="run")
+        await indexing_step.send()
         try:
             from src.ingestion.pipeline import IngestionPipeline
             from src.ingestion.doc_parser import RunbookParser
@@ -252,7 +251,7 @@ async def on_message(message: cl.Message):
                 files=attached_file_paths,
                 repo_name=cl.user_session.get("repo_name", "uploaded_project"),
             )
-            await indexing_msg.remove()
+            await indexing_step.remove()
             await cl.Message(
                 content=(
                     f"✅ **Đã phân tích AST và chunking thành công các file đính kèm!**\n\n"
@@ -263,7 +262,7 @@ async def on_message(message: cl.Message):
             ).send()
             return
         except Exception as exc:
-            await indexing_msg.remove()
+            await indexing_step.remove()
             await cl.Message(content=f"❌ **Lỗi khi chunking file tải lên:** {exc}").send()
             return
 
@@ -280,9 +279,8 @@ async def on_message(message: cl.Message):
         repo_full_name = f"{repo_owner}/{repo_slug}"
         github_url = f"https://github.com/{repo_full_name}"
 
-        indexing_msg = await cl.Message(
-            content=f"*<span style='opacity: 0.6;'>📥 Đang clone repository từ GitHub `{repo_full_name}` và thực hiện chunking AST...</span>*"
-        ).send()
+        indexing_step = cl.Step(name=f"📥 Đang clone repository từ GitHub `{repo_full_name}` và chunking AST...", type="run")
+        await indexing_step.send()
 
         try:
             from src.ingestion.pipeline import IngestionPipeline
@@ -299,7 +297,7 @@ async def on_message(message: cl.Message):
             cl.user_session.set("repo_name", repo_full_name)
             cl.user_session.set("chat_history", [])  # Reset phiên mới cho repo vừa clone
 
-            await indexing_msg.remove()
+            await indexing_step.remove()
             await cl.Message(
                 content=(
                     f"🎉 **Đã clone và đánh chỉ mục thành công GitHub Repository!**\n\n"
@@ -311,7 +309,7 @@ async def on_message(message: cl.Message):
             ).send()
             return
         except Exception as exc:
-            await indexing_msg.remove()
+            await indexing_step.remove()
             await cl.Message(content=f"❌ **Lỗi khi clone & index repo từ GitHub:** {exc}").send()
             return
 
@@ -322,9 +320,8 @@ async def on_message(message: cl.Message):
         if target_path in (".", "./"):
             target_path = "/app"
 
-        indexing_msg = await cl.Message(
-            content=f"*<span style='opacity: 0.6;'>🔄 Đang quét AST và nạp chỉ mục cho thư mục: `{target_path}`...</span>*"
-        ).send()
+        indexing_step = cl.Step(name=f"🔄 Đang quét AST và nạp chỉ mục cho thư mục: `{target_path}`...", type="run")
+        await indexing_step.send()
 
         try:
             from src.ingestion.pipeline import IngestionPipeline
@@ -335,13 +332,13 @@ async def on_message(message: cl.Message):
                 code_parser=TreeSitterCodeParser(),
                 vector_store=vector_store,
                 doc_parser=RunbookParser(),
-                git_collector=GitHistoryCollector(),
+                git_connector=GitHistoryCollector(),
             )
             summary = pipeline.run_full_indexing(
                 repo_path=target_path,
                 docs_path=f"{target_path}/Docs" if Path(f"{target_path}/Docs").is_dir() else None,
             )
-            await indexing_msg.remove()
+            await indexing_step.remove()
             await cl.Message(
                 content=(
                     f"✅ **Đã nạp thành công mã nguồn vào Vector Database!**\n\n"
@@ -351,7 +348,7 @@ async def on_message(message: cl.Message):
                 )
             ).send()
         except Exception as exc:
-            await indexing_msg.remove()
+            await indexing_step.remove()
             await cl.Message(content=f"❌ **Lỗi khi nạp chỉ mục:** {exc}").send()
         return
 
@@ -387,10 +384,9 @@ async def on_message(message: cl.Message):
 
     current_state: dict[str, Any] = dict(initial_state)
 
-    # 4. Hiển thị một dòng trạng thái mờ mờ duy nhất cập nhật theo tiến trình thực tế
-    status_msg = await cl.Message(
-        content="*<span style='opacity: 0.6;'>🔍 Đang phân loại ý định & bóc tách cú pháp...</span>*"
-    ).send()
+    # 4. Hiển thị thanh tiến trình chạy ngầm duy nhất (Status Indicator)
+    status_step = cl.Step(name="🔍 Đang phân loại ý định & bóc tách cú pháp...", type="run")
+    await status_step.send()
 
     thought_logs: list[str] = []
 
@@ -406,8 +402,8 @@ async def on_message(message: cl.Message):
                     thought_logs.append(
                         f"**1. Phân loại:** `{ttype}` | Lỗi: `{sig or 'None'}`"
                     )
-                    status_msg.content = "*<span style='opacity: 0.6;'>📁 Đang truy xuất mã nguồn, lịch sử Git & Runbooks...</span>*"
-                    await status_msg.update()
+                    status_step.name = "📁 Đang truy xuất mã nguồn, lịch sử Git & Runbooks..."
+                    await status_step.update()
 
                 elif node_name == "multi_source_retrieval":
                     c_cnt = len(current_state.get("code_contexts", []))
@@ -415,8 +411,8 @@ async def on_message(message: cl.Message):
                     thought_logs.append(
                         f"**2. Truy xuất:** {c_cnt} chunks code, {i_cnt} docs/commits"
                     )
-                    status_msg.content = "*<span style='opacity: 0.6;'>⚖️ Đang đánh giá mức độ đầy đủ của ngữ cảnh...</span>*"
-                    await status_msg.update()
+                    status_step.name = "⚖️ Đang đánh giá mức độ đầy đủ của ngữ cảnh..."
+                    await status_step.update()
 
                 elif node_name == "grade_context":
                     is_suff = current_state.get("is_sufficient", True)
@@ -425,8 +421,8 @@ async def on_message(message: cl.Message):
                         f"**3. Đánh giá:** {'Đủ' if is_suff else 'Thiếu'} (vòng {iter_num}/3)"
                     )
                     if not is_suff and iter_num < 3:
-                        status_msg.content = f"*<span style='opacity: 0.6;'>🔄 Đang mở rộng phụ thuộc Call Graph (vòng {iter_num + 1}/3)...</span>*"
-                        await status_msg.update()
+                        status_step.name = f"🔄 Đang mở rộng phụ thuộc Call Graph (vòng {iter_num + 1}/3)..."
+                        await status_step.update()
 
                 elif node_name == "expand_dependencies":
                     c_cnt = len(current_state.get("code_contexts", []))
@@ -434,13 +430,13 @@ async def on_message(message: cl.Message):
                     thought_logs.append(
                         f"**4. Mở rộng:** Call Graph mở rộng lên {c_cnt} chunks"
                     )
-                    status_msg.content = f"*<span style='opacity: 0.6;'>⚖️ Đang kiểm định lại ngữ cảnh (vòng {iter_num}/3)...</span>*"
-                    await status_msg.update()
+                    status_step.name = f"⚖️ Đang kiểm định lại ngữ cảnh (vòng {iter_num}/3)..."
+                    await status_step.update()
 
                 elif node_name == "generate_answer":
                     thought_logs.append("**5. Sinh phản hồi:** Hoàn tất sinh câu trả lời")
-                    status_msg.content = "*<span style='opacity: 0.6;'>✍️ Đang kiểm tra đối chiếu trích dẫn mã nguồn...</span>*"
-                    await status_msg.update()
+                    status_step.name = "✍️ Đang kiểm tra đối chiếu trích dẫn mã nguồn..."
+                    await status_step.update()
 
                 elif node_name == "validate_citations":
                     valid = current_state.get("citation_valid", True)
@@ -453,8 +449,8 @@ async def on_message(message: cl.Message):
         try:
             current_state = compiled_workflow.invoke(initial_state)
         except Exception as inner_exc:
-            status_msg.content = f"❌ **Đã xảy ra lỗi khi thực thi xử lý:** {inner_exc}"
-            await status_msg.update()
+            await status_step.remove()
+            await cl.Message(content=f"❌ **Đã xảy ra lỗi khi thực thi xử lý:** {inner_exc}").send()
             return
 
     # 5. Định dạng phản hồi cuối cùng
@@ -506,9 +502,9 @@ async def on_message(message: cl.Message):
 
     response_text = f"{status_badge}\n\n---\n\n{highlighted_response}{thinking_details}"
 
-    # Xóa dòng trạng thái tạm thời và gửi phản hồi chính thức
+    # Xóa thanh tiến trình chạy ngầm và gửi phản hồi chính thức
     try:
-        await status_msg.remove()
+        await status_step.remove()
     except Exception:
         pass
 
