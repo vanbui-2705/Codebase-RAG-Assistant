@@ -40,3 +40,5 @@ class AgentGraphState(TypedDict):
     citation_valid: bool
     citation_error: str | None
     final_response: str
+    repo_name: str | None
+    chat_history: list[dict[str, str]]

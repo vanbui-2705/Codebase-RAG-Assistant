@@ -133,22 +133,39 @@ async def on_chat_start():
     logger.info("Bắt đầu phiên làm việc mới trên Chainlit UI.")
 
     # Khởi tạo workflow và lưu vào session
+    chunk_count = 0
+    doc_count = 0
     try:
         compiled_workflow = _init_agent_workflow()
         cl.user_session.set("workflow", compiled_workflow)
+        cl.user_session.set("chat_history", [])
         session_ready = True
+
+        # Đếm số lượng chunks hiện có trong cơ sở dữ liệu
+        settings = get_settings()
+        from qdrant_client import QdrantClient
+        raw_key = settings.qdrant_api_key.strip() if settings.qdrant_api_key and settings.qdrant_api_key.strip() else None
+        qc = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port, api_key=raw_key, https=False if raw_key is None else None)
+        if qc.collection_exists("code_chunks"):
+            chunk_count = qc.count("code_chunks").count
+        if qc.collection_exists("incident_and_docs"):
+            doc_count = qc.count("incident_and_docs").count
     except Exception as exc:
         logger.error(f"Lỗi khởi tạo Agent Workflow trong UI: {exc}", exc_info=True)
         session_ready = False
 
+    status_tag = f"🟢 **Dữ liệu hiện có:** `{chunk_count}` code chunks, `{doc_count}` tài liệu/docs" if chunk_count > 0 else "🟡 **Chưa nạp dữ liệu:** Gõ `/index .` để nạp mã nguồn hiện tại!"
+
     welcome_message = (
         "## 🛠️ On-call & Codebase RAG Assistant\n\n"
-        "Chào mừng bạn! Hệ thống **Agentic RAG** chuyên biệt cho mã nguồn đã sẵn sàng:\n\n"
-        "- 🔍 **Hỏi đáp kiến trúc**: Giải thích flow xử lý kèm trích dẫn `[file:L_start-L_end]`.\n"
-        "- 🚨 **Chẩn đoán sự cố (RCA)**: Bóc tách lỗi stack trace và lập báo cáo RCA 4 phần.\n"
-        "- 📎 **Tải file đính kèm**: Kéo thả trực tiếp file `.log`, `.txt` vào khung chat.\n"
-        "- 🛡️ **Anti-Hallucination**: Kiểm định số dòng thực tế trước khi hiển thị.\n\n"
-        "*(Hãy nhập câu hỏi kiến trúc hoặc đính kèm log lỗi bên dưới để bắt đầu!)*"
+        "Hệ thống **Agentic RAG** chuyên biệt cho mã nguồn & on-call đã sẵn sàng:\n\n"
+        f"- {status_tag}\n"
+        "- 🔍 **Hỏi đáp kiến trúc**: Nhớ toàn bộ ngữ cảnh hội thoại đa lượt (*Multi-turn memory*).\n"
+        "- 🚨 **Chẩn đoán sự cố (RCA)**: Bóc tách lỗi stack trace, phân tích commit nghi vấn & runbook.\n"
+        "- ⚡ **Lệnh nhanh**:\n"
+        "  - `/clear`: Làm mới phiên trò chuyện (xóa ngữ cảnh cũ để đổi chủ đề).\n"
+        "  - `/index <đường_dẫn>`: Quét và nạp nhanh một repo bất kỳ vào Vector Database.\n\n"
+        "*(Hãy đặt câu hỏi kiến trúc hoặc dán log lỗi bên dưới để bắt đầu!)*"
     )
 
     if not session_ready:
@@ -199,6 +216,51 @@ async def on_message(message: cl.Message):
         await cl.Message(content="⚠️ Vui lòng nhập câu hỏi hoặc đính kèm file log sự cố.").send()
         return
 
+    # Lệnh nhanh: /clear để reset ngữ cảnh
+    if full_input.strip().lower() == "/clear":
+        cl.user_session.set("chat_history", [])
+        await cl.Message(
+            content="🧹 **Đã làm mới phiên trò chuyện!** Toàn bộ ngữ cảnh các câu hỏi trước đã được xóa sạch để bắt đầu chủ đề mới."
+        ).send()
+        return
+
+    # Lệnh nhanh: /index <path> để nạp repo trực tiếp từ khung chat
+    if full_input.strip().lower().startswith("/index"):
+        parts = full_input.strip().split(maxsplit=1)
+        target_path = parts[1].strip() if len(parts) > 1 else "/app"
+        if target_path in (".", "./"):
+            target_path = "/app"
+
+        indexing_msg = await cl.Message(
+            content=f"*<span style='opacity: 0.6;'>🔄 Đang quét AST và nạp chỉ mục cho thư mục: `{target_path}`...</span>*"
+        ).send()
+
+        try:
+            from src.ingestion.pipeline import IngestionPipeline
+            from src.ingestion.doc_parser import RunbookParser
+            embedder = get_hybrid_embedder()
+            vector_store = QdrantStore(embedder=embedder)
+            pipeline = IngestionPipeline(
+                code_parser=TreeSitterCodeParser(),
+                vector_store=vector_store,
+                doc_parser=RunbookParser(),
+                git_collector=GitHistoryCollector(),
+            )
+            summary = pipeline.index_full(repo_path=target_path, docs_path=f"{target_path}/Docs" if Path(f"{target_path}/Docs").is_dir() else None)
+            await indexing_msg.remove()
+            await cl.Message(
+                content=(
+                    f"✅ **Đã nạp thành công mã nguồn vào Vector Database!**\n\n"
+                    f"- 📁 **Mã nguồn (Code chunks):** `{summary.get('code_nodes', 0)}` chunks\n"
+                    f"- 📚 **Tài liệu (Docs/Runbooks):** `{summary.get('doc_nodes', 0)}` bản ghi\n\n"
+                    f"*Bây giờ bạn có thể đặt câu hỏi về kiến trúc hoặc chẩn đoán lỗi trong repo này!*"
+                )
+            ).send()
+        except Exception as exc:
+            await indexing_msg.remove()
+            await cl.Message(content=f"❌ **Lỗi khi nạp chỉ mục:** {exc}").send()
+        return
+
     # 2. Tự động nhận diện sự cố (Incident RCA) hay Hỏi đáp kiến trúc (Codebase QA)
     is_stack_trace = _detect_is_stack_trace(full_input)
     task_mode = "incident_rca" if is_stack_trace else "codebase_qa"
@@ -208,6 +270,9 @@ async def on_message(message: cl.Message):
         if is_stack_trace
         else "🔍 **Chế độ Hỏi đáp Kiến trúc Codebase (Codebase Q&A)**"
     )
+
+    # Lấy lịch sử hội thoại của session hiện tại (Multi-turn memory)
+    chat_history: list[dict[str, str]] = cl.user_session.get("chat_history", [])
 
     # 3. Chuẩn bị state ban đầu cho đồ thị LangGraph
     initial_state: AgentGraphState = {
@@ -222,6 +287,8 @@ async def on_message(message: cl.Message):
         "citation_valid": True,
         "citation_error": None,
         "final_response": "",
+        "repo_name": cl.user_session.get("repo_name", "Codebase-RAG-Assistant"),
+        "chat_history": list(chat_history),
     }
 
     current_state: dict[str, Any] = dict(initial_state)
@@ -350,6 +417,13 @@ async def on_message(message: cl.Message):
         await status_msg.remove()
     except Exception:
         pass
+
+    # Cập nhật lịch sử hội thoại vào session để ghi nhớ ngữ cảnh các lượt hỏi tiếp theo (Multi-turn memory)
+    updated_history = cl.user_session.get("chat_history", [])
+    updated_history.append({"role": "user", "content": full_input})
+    updated_history.append({"role": "assistant", "content": final_raw_response})
+    # Giữ tối đa 12 lượt gần nhất để tránh tràn context
+    cl.user_session.set("chat_history", updated_history[-12:])
 
     await cl.Message(
         content=response_text,

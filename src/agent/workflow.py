@@ -430,11 +430,26 @@ class OnCallAgentWorkflow:
             "NGỮ CẢNH HỆ THỐNG ĐƯỢC CUNG CẤP (CONTEXT)",
             "========================",
             formatted_context,
+        ]
+
+        # Bổ sung lịch sử hội thoại trước đó để duy trì ngữ cảnh đa lượt (Multi-turn chat memory)
+        chat_history = state.get("chat_history", [])
+        if chat_history:
+            prompt_parts.extend([
+                "\n========================",
+                "LỊCH SỬ HỘI THOẠI TRƯỚC ĐÓ (CHAT HISTORY):",
+                "========================",
+            ])
+            for turn in chat_history[-6:]:
+                role = "NGƯỜI DÙNG" if turn.get("role") == "user" else "TRỢ LÝ"
+                prompt_parts.append(f"{role}: {turn.get('content', '')}")
+
+        prompt_parts.extend([
             "\n========================",
-            f"YÊU CẦU CỦA NGƯỜI DÙNG (TASK = {task_type.upper()}):",
+            f"YÊU CẦU CỦA NGƯỜI DÙNG HIỆN TẠI (TASK = {task_type.upper()}):",
             "========================",
             raw_input,
-        ]
+        ])
 
         # Nếu có cảnh báo trích dẫn sai dải dòng từ lần sinh trước
         if citation_error:

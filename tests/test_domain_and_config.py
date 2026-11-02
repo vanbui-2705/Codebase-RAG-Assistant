@@ -20,7 +20,7 @@ def test_settings_singleton_and_defaults():
     settings2 = get_settings()
 
     assert settings1 is settings2
-    assert settings1.gemini_model == "gemini-2.5-flash"
+    assert settings1.gemini_model == "gemini-3.5-flash"
     assert settings1.qdrant_port == 6333
     assert settings1.embedding_model_name == "BAAI/bge-m3"
     assert settings1.reranker_model_name == "BAAI/bge-reranker-v2-m3"
