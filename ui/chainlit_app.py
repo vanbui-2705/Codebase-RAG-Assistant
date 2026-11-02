@@ -226,7 +226,13 @@ async def on_message(message: cl.Message):
 
     current_state: dict[str, Any] = dict(initial_state)
 
-    # 4. Trực quan hóa tiến trình suy luận từng bước (Step Progression) của LangGraph
+    # 4. Hiển thị một dòng trạng thái mờ mờ duy nhất cập nhật theo tiến trình thực tế
+    status_msg = await cl.Message(
+        content="*<span style='opacity: 0.6;'>🔍 Đang phân loại ý định & bóc tách cú pháp...</span>*"
+    ).send()
+
+    thought_logs: list[str] = []
+
     try:
         # Chạy stream qua từng Node trong StateGraph
         for step_event in compiled_workflow.stream(initial_state):
@@ -234,89 +240,60 @@ async def on_message(message: cl.Message):
                 current_state.update(node_update)
 
                 if node_name == "classify_and_parse":
-                    async with cl.Step(
-                        name="1. Phân loại Ý định & Bóc tách Cú pháp Log",
-                        type="tool",
-                    ) as step:
-                        ttype = current_state.get("task_type", "codebase_qa")
-                        sig = current_state.get("error_signature")
-                        syms = current_state.get("extracted_symbols", [])
-                        sym_str = ", ".join(f"`{s}`" for s in syms) if syms else "Không có"
-                        step.output = (
-                            f"- **Phân loại tác vụ:** `{ttype}`\n"
-                            f"- **Chữ ký ngoại lệ / Lỗi:** `{sig or 'Không có'}`\n"
-                            f"- **Thực thể phát hiện:** {sym_str}"
-                        )
+                    ttype = current_state.get("task_type", "codebase_qa")
+                    sig = current_state.get("error_signature")
+                    thought_logs.append(
+                        f"**1. Phân loại:** `{ttype}` | Lỗi: `{sig or 'None'}`"
+                    )
+                    status_msg.content = "*<span style='opacity: 0.6;'>📁 Đang truy xuất mã nguồn, lịch sử Git & Runbooks...</span>*"
+                    await status_msg.update()
 
                 elif node_name == "multi_source_retrieval":
-                    async with cl.Step(
-                        name="2. Truy xuất Đa nguồn Song song (Code, Git, Runbook)",
-                        type="retrieval",
-                    ) as step:
-                        c_cnt = len(current_state.get("code_contexts", []))
-                        i_cnt = len(current_state.get("incident_contexts", []))
-                        step.output = (
-                            f"- 📁 **Mã nguồn (Code Chunks):** {c_cnt} đoạn mã phù hợp\n"
-                            f"- 📚 **Lịch sử Git & Runbooks:** {i_cnt} bản ghi liên quan"
-                        )
+                    c_cnt = len(current_state.get("code_contexts", []))
+                    i_cnt = len(current_state.get("incident_contexts", []))
+                    thought_logs.append(
+                        f"**2. Truy xuất:** {c_cnt} chunks code, {i_cnt} docs/commits"
+                    )
+                    status_msg.content = "*<span style='opacity: 0.6;'>⚖️ Đang đánh giá mức độ đầy đủ của ngữ cảnh...</span>*"
+                    await status_msg.update()
 
                 elif node_name == "grade_context":
-                    async with cl.Step(
-                        name="3. Đánh giá Mức độ Đầy đủ của Ngữ cảnh",
-                        type="llm",
-                    ) as step:
-                        is_suff = current_state.get("is_sufficient", True)
-                        iter_num = current_state.get("iteration_count", 0)
-                        suff_badge = (
-                            "✅ Ngữ cảnh đã đầy đủ" if is_suff else "⚠️ Ngữ cảnh còn thiếu"
-                        )
-                        step.output = (
-                            f"- **Độ đầy đủ:** {suff_badge}\n"
-                            f"- **Số vòng lặp Call Graph:** {iter_num}/3"
-                        )
+                    is_suff = current_state.get("is_sufficient", True)
+                    iter_num = current_state.get("iteration_count", 0)
+                    thought_logs.append(
+                        f"**3. Đánh giá:** {'Đủ' if is_suff else 'Thiếu'} (vòng {iter_num}/3)"
+                    )
+                    if not is_suff and iter_num < 3:
+                        status_msg.content = f"*<span style='opacity: 0.6;'>🔄 Đang mở rộng phụ thuộc Call Graph (vòng {iter_num + 1}/3)...</span>*"
+                        await status_msg.update()
 
                 elif node_name == "expand_dependencies":
-                    async with cl.Step(
-                        name="4. Mở rộng Phụ thuộc qua Call Graph (Callers / Callees)",
-                        type="tool",
-                    ) as step:
-                        c_cnt = len(current_state.get("code_contexts", []))
-                        iter_num = current_state.get("iteration_count", 0)
-                        step.output = (
-                            f"- Đã duyệt Call Graph bổ sung các hàm liên quan.\n"
-                            f"- **Tổng số ngữ cảnh mã nguồn hiện tại:** {c_cnt} (vòng {iter_num})"
-                        )
+                    c_cnt = len(current_state.get("code_contexts", []))
+                    iter_num = current_state.get("iteration_count", 0)
+                    thought_logs.append(
+                        f"**4. Mở rộng:** Call Graph mở rộng lên {c_cnt} chunks"
+                    )
+                    status_msg.content = f"*<span style='opacity: 0.6;'>⚖️ Đang kiểm định lại ngữ cảnh (vòng {iter_num}/3)...</span>*"
+                    await status_msg.update()
 
                 elif node_name == "generate_answer":
-                    async with cl.Step(
-                        name="5. Sinh Phản hồi & Báo cáo kèm Trích dẫn Dòng",
-                        type="llm",
-                    ) as step:
-                        step.output = "LLM đã hoàn thành việc sinh nội dung kèm trích dẫn."
+                    thought_logs.append("**5. Sinh phản hồi:** Hoàn tất sinh câu trả lời")
+                    status_msg.content = "*<span style='opacity: 0.6;'>✍️ Đang kiểm tra đối chiếu trích dẫn mã nguồn...</span>*"
+                    await status_msg.update()
 
                 elif node_name == "validate_citations":
-                    async with cl.Step(
-                        name="6. Kiểm định Trích dẫn Chống Ảo giác",
-                        type="tool",
-                    ) as step:
-                        valid = current_state.get("citation_valid", True)
-                        err = current_state.get("citation_error")
-                        if valid:
-                            step.output = (
-                                "✅ Mọi trích dẫn `[file_path:L_start-L_end]` đều hợp lệ."
-                            )
-                        else:
-                            step.output = f"⚠️ Phát hiện số dòng ngoài phạm vi, đã sửa chữa:\n{err}"
+                    valid = current_state.get("citation_valid", True)
+                    thought_logs.append(
+                        f"**6. Trích dẫn:** {'Hợp lệ' if valid else 'Đã hiệu chỉnh'}"
+                    )
 
     except Exception as exc:
         logger.error(f"Lỗi trong quá trình chạy LangGraph stream: {exc}", exc_info=True)
-        # Fallback gọi invoke thông thường nếu stream gặp trục trặc
         try:
             current_state = compiled_workflow.invoke(initial_state)
         except Exception as inner_exc:
-            await cl.Message(
-                content=f"❌ **Đã xảy ra lỗi khi thực thi xử lý:** {inner_exc}"
-            ).send()
+            status_msg.content = f"❌ **Đã xảy ra lỗi khi thực thi xử lý:** {inner_exc}"
+            await status_msg.update()
             return
 
     # 5. Định dạng phản hồi cuối cùng
@@ -361,7 +338,18 @@ async def on_message(message: cl.Message):
             )
         )
 
-    response_text = f"{status_badge}\n\n---\n\n{highlighted_response}"
+    thinking_details = ""
+    if thought_logs:
+        log_items = "\n".join(f"- {log}" for log in thought_logs)
+        thinking_details = f"\n\n<details>\n<summary>🧠 <i>Chi tiết tiến trình suy luận (Thinking)</i></summary>\n\n{log_items}\n\n</details>"
+
+    response_text = f"{status_badge}\n\n---\n\n{highlighted_response}{thinking_details}"
+
+    # Xóa dòng trạng thái tạm thời và gửi phản hồi chính thức
+    try:
+        await status_msg.remove()
+    except Exception:
+        pass
 
     await cl.Message(
         content=response_text,
